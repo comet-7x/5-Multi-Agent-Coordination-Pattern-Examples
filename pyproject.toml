@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "multi-agent-coordination-pattern-examples"
+version = "0.1.0"
+description = "基于 CAMEL-AI 实现多智能体协调模式（Multi-Agent Coordination Patterns）示例"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "zhihaoliu", email = "zhihao7946@gmail.com" }]
+requires-python = ">=3.11"
+keywords = ["multi-agent", "camel-ai", "coordination-patterns", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "camel-ai[all]>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/comet-7x/5-Multi-Agent-Coordination-Pattern-Examples"
+"Bug Tracker" = "https://github.com/comet-7x/5-Multi-Agent-Coordination-Pattern-Examples/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
