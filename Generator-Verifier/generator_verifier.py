@@ -1,24 +1,14 @@
 import asyncio
-import os
 import json
-from dataclasses import dataclass
-from typing import Any
 
 from pydantic import Field, BaseModel
 
 from camel.agents import ChatAgent
 from camel.messages import BaseMessage
-from camel.models import ModelFactory, BaseModelBackend
-from camel.types import ModelPlatformType
+from camel.models import BaseModelBackend
 from camel.responses import ChatAgentResponse
 
-
-@dataclass
-class ModelConfig:
-    url: str
-    name: str
-    api_key: str
-    config: dict[str, Any]
+from model_setup import get_model_backend
 
 
 class GeneratorOutput(BaseModel):
@@ -60,32 +50,6 @@ class GeneratorVerifier:
         return await self.verifier.astep(*args, **kwargs)
 
 
-def get_model_config() -> ModelConfig:
-    return ModelConfig(
-        url=os.environ["MODEL_URL"],
-        name=os.environ["MODEL_NAME"],
-        api_key=os.environ["MODEL_API_KEY"],
-        config={
-            "temperature": 0.1,
-            "stream": False,
-            "extra_body": {
-                "chat_template_kwargs": {"enable_thinking": False},
-            },
-        },
-    )
-
-
-def get_model_backend() -> BaseModelBackend:
-    model_config = get_model_config()
-    return ModelFactory.create(
-        model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
-        model_type=model_config.name,
-        api_key=model_config.api_key,
-        url=model_config.url,
-        model_config_dict=model_config.config,
-    )
-
-
 def create_generator(model_backend: BaseModelBackend) -> ChatAgent:
     system_message = BaseMessage.make_assistant_message(
         role_name="Generator",
@@ -125,31 +89,51 @@ def create_generator_verifier() -> GeneratorVerifier:
 _PASS_SCORE_THRESHOLD = 0.9
 
 
+def _parse_generator(response) -> GeneratorOutput:
+    if response.msg is None:
+        raise ValueError("Generator 生成的响应消息为空")
+    return GeneratorOutput(**json.loads(response.msg.content))
+
+
+def _parse_verifier(response) -> VerifierOutput:
+    if response.msg is None:
+        raise ValueError("Verifier 生成的响应消息为空")
+    return VerifierOutput(**json.loads(response.msg.content))
+
+
+def _ensure_not_stream(response: object) -> ChatAgentResponse:
+    if not isinstance(response, ChatAgentResponse):
+        raise ValueError("模型的 stream 参数应设置为 false")
+    return response
+
+
 def generator_verifier_loop(task: str, max_iterations: int = 3) -> GeneratorVerifierOutput:
+    """
+    Generator-Verifier 模式
+    -----------------------
+    Generator 生成内容 → Verifier 打分并给出反馈 → 未通过则带着反馈重新生成
+    循环直到通过验证或达到最大迭代次数。
+    """
     generator_outputs: list[GeneratorOutput] = []
     verifier_outputs: list[VerifierOutput] = []
     gv = create_generator_verifier()
 
     user_msg = BaseMessage.make_user_message(role_name="User", content=task)
-    gen_response = gv.generate(user_msg, response_format=GeneratorOutput)
-    if gen_response.msg is None:
-        raise ValueError("Generator 生成的响应消息为空")
-    current_output = GeneratorOutput(**json.loads(gen_response.msg.content))
+    current_output = _parse_generator(gv.generate(user_msg, response_format=GeneratorOutput))
     generator_outputs.append(current_output)
 
+    passed = False
     for i in range(max_iterations):
         verify_msg = BaseMessage.make_user_message(
             role_name="User",
             content=f"请评审以下代码：\n\n{current_output.output}",
         )
-        verify_response = gv.verify(verify_msg, response_format=VerifierOutput)
-        if verify_response.msg is None:
-            raise ValueError("Verifier 生成的响应消息为空")
-        current_verify = VerifierOutput(**json.loads(verify_response.msg.content))
+        current_verify = _parse_verifier(gv.verify(verify_msg, response_format=VerifierOutput))
         verifier_outputs.append(current_verify)
 
         if current_verify.score >= _PASS_SCORE_THRESHOLD:
             print(f"✅ 第 {i + 1} 轮通过验证 (score={current_verify.score:.2f})")
+            passed = True
             break
 
         print(
@@ -164,12 +148,12 @@ def generator_verifier_loop(task: str, max_iterations: int = 3) -> GeneratorVeri
                     f"\n\n原代码：\n{current_output.output}"
                 ),
             )
-            gen_response = gv.generate(revise_msg, response_format=GeneratorOutput)
-            if gen_response.msg is None:
-                raise ValueError("Generator 生成的响应消息为空")
-            current_output = GeneratorOutput(**json.loads(gen_response.msg.content))
+            current_output = _parse_generator(
+                gv.generate(revise_msg, response_format=GeneratorOutput)
+            )
             generator_outputs.append(current_output)
-    else:
+
+    if not passed:
         print("⚠️ 达到最大迭代次数，返回最佳尝试")
 
     return GeneratorVerifierOutput(
@@ -184,27 +168,25 @@ async def agenerator_verifier_loop(task: str, max_iterations: int = 3) -> Genera
     gv = create_generator_verifier()
 
     user_msg = BaseMessage.make_user_message(role_name="User", content=task)
-    gen_response = await gv.agenerate(user_msg, response_format=GeneratorOutput)
-    if not isinstance(gen_response, ChatAgentResponse):
-        raise ValueError("Generator 的 stream 参数应设置为False")
-    if gen_response.msg is None:
-        raise ValueError("Generator 生成的响应消息为空")
-    current_output = GeneratorOutput(**json.loads(gen_response.msg.content))
+    current_output = _parse_generator(
+        _ensure_not_stream(await gv.agenerate(user_msg, response_format=GeneratorOutput))
+    )
     generator_outputs.append(current_output)
 
+    passed = False
     for i in range(max_iterations):
         verify_msg = BaseMessage.make_user_message(
             role_name="User",
             content=f"请评审以下代码：\n\n{current_output.output}",
         )
-        verify_response = await gv.averify(verify_msg, response_format=VerifierOutput)
-        if verify_response.msg is None:
-            raise ValueError("Verifier 生成的响应消息为空")
-        current_verify = VerifierOutput(**json.loads(verify_response.msg.content))
+        current_verify = _parse_verifier(
+            _ensure_not_stream(await gv.averify(verify_msg, response_format=VerifierOutput))
+        )
         verifier_outputs.append(current_verify)
 
         if current_verify.score >= _PASS_SCORE_THRESHOLD:
             print(f"✅ 第 {i + 1} 轮通过验证 (score={current_verify.score:.2f})")
+            passed = True
             break
 
         print(
@@ -219,12 +201,12 @@ async def agenerator_verifier_loop(task: str, max_iterations: int = 3) -> Genera
                     f"\n\n原代码：\n{current_output.output}"
                 ),
             )
-            gen_response = await gv.agenerate(revise_msg, response_format=GeneratorOutput)
-            if gen_response.msg is None:
-                raise ValueError("Generator 生成的响应消息为空")
-            current_output = GeneratorOutput(**json.loads(gen_response.msg.content))
+            current_output = _parse_generator(
+                _ensure_not_stream(await gv.agenerate(revise_msg, response_format=GeneratorOutput))
+            )
             generator_outputs.append(current_output)
-    else:
+
+    if not passed:
         print("⚠️ 达到最大迭代次数，返回最佳尝试")
 
     return GeneratorVerifierOutput(
@@ -235,8 +217,9 @@ async def agenerator_verifier_loop(task: str, max_iterations: int = 3) -> Genera
 
 if __name__ == "__main__":
     task = "请生成一个计算两个数的乘积的函数，并添加错误处理。"
+
     result = generator_verifier_loop(task)
     print(result.final_code)
-    result_async = asyncio.run(agenerator_verifier_loop(task))
 
+    result_async = asyncio.run(agenerator_verifier_loop(task))
     print(result_async.final_code)

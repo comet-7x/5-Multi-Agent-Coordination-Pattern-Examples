@@ -22,6 +22,8 @@ classifiers = [
 ]
 dependencies = [
     "camel-ai>=0.2.90",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
